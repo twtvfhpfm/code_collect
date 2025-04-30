@@ -121,6 +121,7 @@ int main(int argc, char *argv[])
     char file_name[128];
     sprintf(file_name, "udp_rtt_%ld.log", time(NULL));
     FILE* log_fp = fopen(file_name, "w");
+	int packets_sent = 0;
     while (1) {
         fd_set rfds, wfds;
         FD_ZERO(&rfds);
@@ -146,6 +147,10 @@ int main(int argc, char *argv[])
                     perror("send");
                     exit (1);
                 }
+				packets_sent++;
+				if (packets_sent % 100 == 0) {
+					printf("packets_send: %d\n", packets_sent);
+				}
 		send_bytes_count += sizeof(send_buf);
 		if (send_t - last_send_rate_time > 1000) {
 			last_send_rate_time = send_t;
