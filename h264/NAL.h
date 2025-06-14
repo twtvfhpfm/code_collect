@@ -15,6 +15,7 @@ class NAL {
         uint32_t read_ue();
         int32_t read_se();
         bool eof();
+        void print();
 
     private:
         std::vector<uint8_t> bytes;

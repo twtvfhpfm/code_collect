@@ -1,6 +1,9 @@
 #include "macroblock.h"
+#include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
+#include <iostream>
 #include "H264Decoder.h"
 #include "common.h"
 
@@ -846,15 +849,23 @@ static void dct2x2dc( int16_t d[2][2] )
     d[1][1] = tmp[1][0] - tmp[1][1];
 }
 
-void x264_mb_decode_8x8(int b_inter, int i_qscale, int* stride, uint8_t* dst[2], int chroma_dc[2][4], int* residual_ac[8], int chroma_pred_mode)
+void x264_mb_predict_chroma_8x8(int chroma_pred_mode, uint8_t* dst[2],  int* stride)
 {
-    int i, ch;
-
-    printf("8x8 pred mode: %d, qp:%d\n", chroma_pred_mode, i_qscale);
-    for( ch = 0; ch < 2; ch++ )
+    printf("8x8 pred mode: %d\n", chroma_pred_mode);
+    for(int ch = 0; ch < 2; ch++ )
     {
         const int i_stride = stride[1+ch];
         g_predict_8x8[chroma_pred_mode](dst[ch], i_stride);
+    }
+}
+
+void x264_mb_decode_8x8(int b_inter, int i_qscale, int* stride, uint8_t* dst[2], int chroma_dc[2][4], int* residual_ac[8])
+{
+    int i, ch;
+
+    for( ch = 0; ch < 2; ch++ )
+    {
+        const int i_stride = stride[1+ch];
 
         int16_t dct2x2[2][2];
         int16_t dct4x4[4][4][4];
@@ -1384,7 +1395,6 @@ static const int i_chroma_qp_table[52] =
     39, 39
 };
 
-
 #define IS_INTRA(type) ( (type) == I_4x4 || (type) == I_16x16 )
 void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_height, int i_chroma_qp_index_offset)
 {
@@ -1392,6 +1402,8 @@ void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_hei
     const int s4x4 = 4 * i_mb_stride;
 
     int mb_y, mb_x;
+    int loop_count = 0;
+    int sum = 0;
 
     for( mb_y = 0, mb_x = 0; mb_y < i_mb_height; )
     {
@@ -1400,6 +1412,7 @@ void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_hei
         const int mb_4x4 = 4 * s4x4 * mb_y + 4 * mb_x;
         int i_edge;
         int i_dir;
+        printf("loop_count: %d\n", loop_count++);
 
         /* i_dir == 0 -> vertical edge
          * i_dir == 1 -> horizontal edge */
@@ -1418,14 +1431,15 @@ void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_hei
 
                 int bS[4];  /* filtering strength */
 
+                MacroBlockPtr mb = frame->mbList[mb_xy];
+                MacroBlockPtr mbn = frame->mbList[mbn_xy];
                 /* *** Get bS for each 4px for the current edge *** */
-                if( IS_INTRA( frame->mbList[mb_xy]->type) || IS_INTRA( frame->mbList[mbn_xy]->type ) )
+                if( IS_INTRA( mb->type) || IS_INTRA( mbn->type ) )
                 {
                     bS[0] = bS[1] = bS[2] = bS[3] = ( i_edge == 0 ? 4 : 3 );
                 }
                 else
                 {
-#if 0
                     int i;
                     for( i = 0; i < 4; i++ )
                     {
@@ -1434,16 +1448,16 @@ void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_hei
                         int xn = (x - (i_dir == 0 ? 1 : 0 ))&0x03;
                         int yn = (y - (i_dir == 0 ? 0 : 1 ))&0x03;
 
-                        if( h->mb.non_zero_count[mb_xy][block_idx_xy[x][y]] != 0 ||
-                            h->mb.non_zero_count[mbn_xy][block_idx_xy[xn][yn]] != 0 )
+                        if( mb->nonZeroCount[x264_scan8[0]+x+y*8] != 0 ||
+                            mbn->nonZeroCount[x264_scan8[0]+xn+yn*8] != 0 )
                         {
                             bS[i] = 2;
                         }
-                        else if( i_slice_type == SLICE_TYPE_P )
+                        else if( frame->header.sliceType % 5 == SliceTypeP)
                         {
-                            if( h->mb.ref[0][mb_8x8+(x/2)+(y/2)*s8x8] != h->mb.ref[0][mbn_8x8+(xn/2)+(yn/2)*s8x8] ||
-                                abs( h->mb.mv[0][mb_4x4+x+y*s4x4][0] - h->mb.mv[0][mbn_4x4+xn+yn*s4x4][0] ) >= 4 ||
-                                abs( h->mb.mv[0][mb_4x4+x+y*s4x4][1] - h->mb.mv[0][mbn_4x4+xn+yn*s4x4][1] ) >= 4 )
+                            if( mb->ref[0][x264_scan8[0]+x+y*8] != mbn->ref[0][x264_scan8[0]+xn+yn*8] ||
+                                abs( mb->mv[0][x264_scan8[0]+x+y*8][0] - mbn->mv[0][x264_scan8[0]+xn+yn*8][0] ) >= 4 ||
+                                abs( mb->mv[0][x264_scan8[0]+x+y*8][1] - mbn->mv[0][x264_scan8[0]+xn+yn*8][1] ) >= 4 )
                             {
                                 bS[i] = 1;
                             }
@@ -1455,17 +1469,19 @@ void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_hei
                         else
                         {
                             /* FIXME */
-                            x264_log( h, X264_LOG_ERROR, "deblocking filter doesn't work yet with B slice\n" );
+                            printf("deblocking filter doesn't work yet with B slice\n" );
                             return;
                         }
                     }
-#endif
                 }
+                printf("bsbs %d %d %d %d\n", bS[0], bS[1], bS[2], bS[3]);
 
                 /* *** filter *** */
                 /* Y plane */
                 i_qp = frame->mbList[mb_xy]->qp;
                 i_qpn= frame->mbList[mbn_xy]->qp;
+                sum+= bS[0]+bS[1]+bS[2]+bS[3]+i_qp+i_qpn+i_dir+i_edge+i_chroma_qp_index_offset;
+                printf("qp %d qpn %d dir %d edge %d offset %d sum %d\n", i_qp, i_qpn, i_dir, i_edge, i_chroma_qp_index_offset, sum);
 
                 if( i_dir == 0 )
                 {
@@ -1509,5 +1525,669 @@ void x264_frame_deblocking_filter( FramePtr frame, int i_mb_stride, int i_mb_hei
             mb_x = 0;
             mb_y++;
         }
+    }
+}
+
+static inline int x264_median( int a, int b, int c )
+{
+    int min = a, max =a;
+    if( b < min )
+        min = b;
+    else
+        max = b;    /* no need to do 'b > max' (more consuming than always doing affectation) */
+
+    if( c < min )
+        min = c;
+    else if( c > max )
+        max = c;
+
+    return a + b + c - min - max;
+}
+
+void x264_mb_predict_mv(MacroBlockPtr mb, int i_list, int idx, int i_width, int mvp[2] )
+{
+    const int i8 = x264_scan8[idx];
+    const int i_ref= mb->ref[i_list][i8];
+    int     i_refa = mb->ref[i_list][i8 - 1];
+    int16_t *mv_a  = mb->mv[i_list][i8 - 1];
+    int     i_refb = mb->ref[i_list][i8 - 8];
+    int16_t *mv_b  = mb->mv[i_list][i8 - 8];
+    int     i_refc = mb->ref[i_list][i8 - 8 + i_width ];
+    int16_t *mv_c  = mb->mv[i_list][i8 - 8 + i_width];
+
+    int i_count;
+
+    if( (idx&0x03) == 3 || ( i_width == 2 && (idx&0x3) == 2 )|| i_refc == -2 )
+    {
+        i_refc = mb->ref[i_list][i8 - 8 - 1];
+        mv_c   = mb->mv[i_list][i8 - 8 - 1];
+    }
+
+    if( mb->type == P_16x8 )
+    {
+        if( idx == 0 && i_refb == i_ref )
+        {
+            mvp[0] = mv_b[0];
+            mvp[1] = mv_b[1];
+            return;
+        }
+        else if( idx != 0 && i_refa == i_ref )
+        {
+            mvp[0] = mv_a[0];
+            mvp[1] = mv_a[1];
+            return;
+        }
+    }
+    else if( mb->type == P_8x16 )
+    {
+        if( idx == 0 && i_refa == i_ref )
+        {
+            mvp[0] = mv_a[0];
+            mvp[1] = mv_a[1];
+            return;
+        }
+        else if( idx != 0 && i_refc == i_ref )
+        {
+            mvp[0] = mv_c[0];
+            mvp[1] = mv_c[1];
+            return;
+        }
+    }
+
+    i_count = 0;
+    if( i_refa == i_ref ) i_count++;
+    if( i_refb == i_ref ) i_count++;
+    if( i_refc == i_ref ) i_count++;
+
+    if( i_count > 1 )
+    {
+        mvp[0] = x264_median( mv_a[0], mv_b[0], mv_c[0] );
+        mvp[1] = x264_median( mv_a[1], mv_b[1], mv_c[1] );
+    }
+    else if( i_count == 1 )
+    {
+        if( i_refa == i_ref )
+        {
+            mvp[0] = mv_a[0];
+            mvp[1] = mv_a[1];
+        }
+        else if( i_refb == i_ref )
+        {
+            mvp[0] = mv_b[0];
+            mvp[1] = mv_b[1];
+        }
+        else
+        {
+            mvp[0] = mv_c[0];
+            mvp[1] = mv_c[1];
+        }
+    }
+    else if( i_refb == -2 && i_refc == -2 && i_refa != -2 )
+    {
+        mvp[0] = mv_a[0];
+        mvp[1] = mv_a[1];
+    }
+    else
+    {
+        mvp[0] = x264_median( mv_a[0], mv_b[0], mv_c[0] );
+        mvp[1] = x264_median( mv_a[1], mv_b[1], mv_c[1] );
+    }
+}
+
+void x264_mb_predict_mv_16x16(MacroBlockPtr mb, int i_list, int i_ref, int mvp[2] )
+{
+    int     i_refa = mb->ref[i_list][X264_SCAN8_0 - 1];
+    int16_t *mv_a  = mb->mv[i_list][X264_SCAN8_0 - 1];
+    int     i_refb = mb->ref[i_list][X264_SCAN8_0 - 8];
+    int16_t *mv_b  = mb->mv[i_list][X264_SCAN8_0 - 8];
+    int     i_refc = mb->ref[i_list][X264_SCAN8_0 - 8 + 4];
+    int16_t *mv_c  = mb->mv[i_list][X264_SCAN8_0 - 8 + 4];
+
+    int i_count;
+
+    if( i_refc == -2 )
+    {
+        i_refc = mb->ref[i_list][X264_SCAN8_0 - 8 - 1];
+        mv_c   = mb->mv[i_list][X264_SCAN8_0 - 8 - 1];
+    }
+
+    i_count = 0;
+    if( i_refa == i_ref ) i_count++;
+    if( i_refb == i_ref ) i_count++;
+    if( i_refc == i_ref ) i_count++;
+
+    if( i_count > 1 )
+    {
+        mvp[0] = x264_median( mv_a[0], mv_b[0], mv_c[0] );
+        mvp[1] = x264_median( mv_a[1], mv_b[1], mv_c[1] );
+    }
+    else if( i_count == 1 )
+    {
+        if( i_refa == i_ref )
+        {
+            mvp[0] = mv_a[0];
+            mvp[1] = mv_a[1];
+        }
+        else if( i_refb == i_ref )
+        {
+            mvp[0] = mv_b[0];
+            mvp[1] = mv_b[1];
+        }
+        else
+        {
+            mvp[0] = mv_c[0];
+            mvp[1] = mv_c[1];
+        }
+    }
+    else if( i_refb == -2 && i_refc == -2 && i_refa != -2 )
+    {
+        mvp[0] = mv_a[0];
+        mvp[1] = mv_a[1];
+    }
+    else
+    {
+        mvp[0] = x264_median( mv_a[0], mv_b[0], mv_c[0] );
+        mvp[1] = x264_median( mv_a[1], mv_b[1], mv_c[1] );
+    }
+}
+
+
+void x264_mb_predict_mv_pskip(MacroBlockPtr mb, int mv[2] )
+{
+    int     i_refa = mb->ref[0][X264_SCAN8_0 - 1];
+    int     i_refb = mb->ref[0][X264_SCAN8_0 - 8];
+    int16_t *mv_a  = mb->mv[0][X264_SCAN8_0 - 1];
+    int16_t *mv_b  = mb->mv[0][X264_SCAN8_0 - 8];
+
+    if( i_refa == -2 || i_refb == -2 ||
+        ( i_refa == 0 && mv_a[0] == 0 && mv_a[1] == 0 ) ||
+        ( i_refb == 0 && mv_b[0] == 0 && mv_b[1] == 0 ) )
+    {
+        mv[0] = mv[1] = 0;
+    }
+    else
+    {
+        x264_mb_predict_mv_16x16(mb, 0, 0, mv );
+    }
+}
+
+static inline int x264_tapfilter( uint8_t *pix, int i_pix_next )
+{
+    return pix[-2*i_pix_next] - 5*pix[-1*i_pix_next] + 20*(pix[0] + pix[1*i_pix_next]) - 5*pix[ 2*i_pix_next] + pix[ 3*i_pix_next];
+}
+static inline int x264_tapfilter1( uint8_t *pix )
+{
+    return pix[-2] - 5*pix[-1] + 20*(pix[0] + pix[1]) - 5*pix[ 2] + pix[ 3];
+}
+
+static inline void pixel_avg( uint8_t *dst,  int i_dst_stride,
+                              uint8_t *src1, int i_src1_stride,
+                              uint8_t *src2, int i_src2_stride,
+                              int i_width, int i_height )
+{
+    int x, y;
+    for( y = 0; y < i_height; y++ )
+    {
+        for( x = 0; x < i_width; x++ )
+        {
+            dst[x] = ( src1[x] + src2[x] + 1 ) >> 1;
+        }
+        dst  += i_dst_stride;
+        src1 += i_src1_stride;
+        src2 += i_src2_stride;
+    }
+}
+
+
+/* Clip1 table
+ * XXX : only for tap filter.
+ *
+ * With tap filter (( 1, -5, 20, 20, -5, 1 ) + 16 )/ 32
+ * -> (-2*5 * 255+16)/32 <= out <= (2*1*255 + 2*20*255+16)/32
+ * -> -80 <= out <= 335
+ * So we need a table of 80+335+1 = 416 entries
+ */
+
+static const uint8_t x264_mc_clip1_table[80+1+335] =
+{
+    /* -80 -> -1 */
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+    0,0,0,0,0,0,
+    /* 0 -> 255 */
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17,
+    18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+    36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53,
+    54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71,
+    72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+    90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,101,102,103,104,105,106,107,
+    108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,
+    126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,
+    144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,
+    162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,
+    180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,
+    198,199,200,201,202,203,204,205,206,207,208,209,210,211,212,213,214,215,
+    216,217,218,219,220,221,222,223,224,225,226,227,228,229,230,231,232,233,
+    234,235,236,237,238,239,240,241,242,243,244,245,246,247,248,249,250,251,
+    252,253,254,255,
+    /* 256 -> 340 */
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
+    255,255,255,255,255,255,255,255,
+};
+
+static inline uint8_t x264_mc_clip1( int x )
+{
+    return x264_mc_clip1_table[x+80];
+}
+
+typedef void (*pf_mc_t)(uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height );
+
+
+static void mc_copy( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    int y;
+
+    for( y = 0; y < i_height; y++ )
+    {
+        memcpy( dst, src, i_width );
+
+        src += i_src_stride;
+        dst += i_dst_stride;
+    }
+}
+
+static inline void mc_hh( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    int x, y;
+
+    for( y = 0; y < i_height; y++ )
+    {
+        for( x = 0; x < i_width; x++ )
+        {
+            dst[x] = x264_mc_clip1( ( x264_tapfilter1( &src[x] ) + 16 ) >> 5 );
+        }
+        src += i_src_stride;
+        dst += i_dst_stride;
+    }
+}
+static inline void mc_hv( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    int x, y;
+
+    for( y = 0; y < i_height; y++ )
+    {
+        for( x = 0; x < i_width; x++ )
+        {
+            dst[x] = x264_mc_clip1( ( x264_tapfilter( &src[x], i_src_stride ) + 16 ) >> 5 );
+        }
+        src += i_src_stride;
+        dst += i_dst_stride;
+    }
+}
+static inline void mc_hc( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t *out;
+    uint8_t *pix;
+    int x, y;
+
+    for( x = 0; x < i_width; x++ )
+    {
+        int tap[6];
+
+        pix = &src[x];
+        out = &dst[x];
+
+        tap[0] = x264_tapfilter1( &pix[-2*i_src_stride] );
+        tap[1] = x264_tapfilter1( &pix[-1*i_src_stride] );
+        tap[2] = x264_tapfilter1( &pix[ 0*i_src_stride] );
+        tap[3] = x264_tapfilter1( &pix[ 1*i_src_stride] );
+        tap[4] = x264_tapfilter1( &pix[ 2*i_src_stride] );
+
+        for( y = 0; y < i_height; y++ )
+        {
+            tap[5] = x264_tapfilter1( &pix[ 3*i_src_stride] );
+
+            *out = x264_mc_clip1( ( tap[0] - 5*tap[1] + 20 * tap[2] + 20 * tap[3] -5*tap[4] + tap[5] + 512 ) >> 10 );
+
+            /* Next line */
+            pix += i_src_stride;
+            out += i_dst_stride;
+            tap[0] = tap[1];
+            tap[1] = tap[2];
+            tap[2] = tap[3];
+            tap[3] = tap[4];
+            tap[4] = tap[5];
+        }
+    }
+}
+
+/* mc I+H */
+static void mc_xy10( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp[16*16];
+    mc_hh( src, i_src_stride, tmp, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, src, i_src_stride, tmp, i_width, i_width, i_height );
+}
+static void mc_xy30( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp[16*16];
+    mc_hh( src, i_src_stride, tmp, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, src+1, i_src_stride, tmp, i_width, i_width, i_height );
+}
+/* mc I+V */
+static void mc_xy01( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp[16*16];
+    mc_hv( src, i_src_stride, tmp, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, src, i_src_stride, tmp, i_width, i_width, i_height );
+}
+static void mc_xy03( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp[16*16];
+    mc_hv( src, i_src_stride, tmp, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, src+i_src_stride, i_src_stride, tmp, i_width, i_width, i_height );
+}
+/* H+V */
+static void mc_xy11( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hv( src, i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hh( src, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy31( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hv( src+1, i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hh( src,   i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy13( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hv( src,              i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hh( src+i_src_stride, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy33( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hv( src+1,            i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hh( src+i_src_stride, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy21( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hc( src, i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hh( src, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy12( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hc( src, i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hv( src, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy32( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hc( src,   i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hv( src+1, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+static void mc_xy23( uint8_t *src, int i_src_stride, uint8_t *dst, int i_dst_stride, int i_width, int i_height )
+{
+    uint8_t tmp1[16*16];
+    uint8_t tmp2[16*16];
+
+    mc_hc( src,              i_src_stride, tmp1, i_width, i_width, i_height );
+    mc_hh( src+i_src_stride, i_src_stride, tmp2, i_width, i_width, i_height );
+    pixel_avg( dst, i_dst_stride, tmp1, i_width, tmp2, i_width, i_width, i_height );
+}
+
+static void motion_compensation_luma( uint8_t *src, int i_src_stride,
+                                      uint8_t *dst, int i_dst_stride,
+                                      int mvx,int mvy,
+                                      int i_width, int i_height )
+{
+    static pf_mc_t pf_mc[4][4] =    /*XXX [dqy][dqx] */
+    {
+        { mc_copy,  mc_xy10,    mc_hh,      mc_xy30 },
+        { mc_xy01,  mc_xy11,    mc_xy21,    mc_xy31 },
+        { mc_hv,    mc_xy12,    mc_hc,      mc_xy32 },
+        { mc_xy03,  mc_xy13,    mc_xy23,    mc_xy33 },
+    };
+
+    src += (mvy >> 2) * i_src_stride + (mvx >> 2);
+    pf_mc[mvy&0x03][mvx&0x03]( src, i_src_stride, dst, i_dst_stride, i_width, i_height );
+
+    std::cout<<"mc luma"<<std::endl;
+    for(int h=0;h<i_height;h++){
+        uint8_t* p = dst+h*i_dst_stride;
+        for(int w=0;w<i_width;w++){
+            std::cout << (int)p[w] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+/* full chroma mc (ie until 1/8 pixel)*/
+static void motion_compensation_chroma( uint8_t *src, int i_src_stride,
+                                        uint8_t *dst, int i_dst_stride,
+                                        int mvx, int mvy,
+                                        int i_width, int i_height )
+{
+    uint8_t *srcp;
+    int x, y;
+    uint8_t *dst_orig = dst;
+
+    const int d8x = mvx&0x07;
+    const int d8y = mvy&0x07;
+
+    const int cA = (8-d8x)*(8-d8y);
+    const int cB = d8x    *(8-d8y);
+    const int cC = (8-d8x)*d8y;
+    const int cD = d8x    *d8y;
+
+    src  += (mvy >> 3) * i_src_stride + (mvx >> 3);
+    srcp = &src[i_src_stride];
+
+    for( y = 0; y < i_height; y++ )
+    {
+        for( x = 0; x < i_width; x++ )
+        {
+            dst[x] = ( cA*src[x]  + cB*src[x+1] +
+                       cC*srcp[x] + cD*srcp[x+1] + 32 ) >> 6;
+        }
+        dst  += i_dst_stride;
+
+        src   = srcp;
+        srcp += i_src_stride;
+    }
+
+    std::cout<<"mc chroma"<<std::endl;
+    for(int h=0;h<i_height;h++){
+        uint8_t* p = dst_orig+h*i_dst_stride;
+        for(int w=0;w<i_width;w++){
+            std::cout << (int)p[w] << " ";
+        }
+        std::cout << std::endl;
+    }
+}
+
+void x264_macroblock_decode_pskip(MacroBlockPtr mb, uint8_t* src[3], int src_stride[3], uint8_t* dst[3], int dst_stride[3])
+{
+    const int mvx = x264_clip3( mb->mv[0][x264_scan8[0]][0],
+                                mb->mv_min[0], mb->mv_max[0] );
+    const int mvy = x264_clip3( mb->mv[0][x264_scan8[0]][1],
+                                mb->mv_min[1], mb->mv_max[1] );
+
+    std::cout << "mvx " << mvx << ", mvy " << mvy << std::endl;
+    /* Motion compensation XXX probably unneeded */
+    motion_compensation_luma( src[0], src_stride[0],
+                    dst[0],       dst_stride[0],
+                    mvx, mvy, 16, 16 );
+
+    /* Chroma MC */
+    motion_compensation_chroma( src[1], src_stride[1],
+                      dst[1],       dst_stride[1],
+                      mvx, mvy, 8, 8 );
+
+    motion_compensation_chroma( src[2], src_stride[2],
+                      dst[2],       dst_stride[2],
+                      mvx, mvy, 8, 8 );
+
+    int i;
+    mb->cbpLuma= 0x00;
+    mb->cbpChroma = 0x00;
+
+    for( i = 0; i < 16+8; i++ )
+    {
+        mb->nonZeroCount[x264_scan8[i]] = 0;
+    }
+
+    /* store cbp */
+    // h->mb.cbp[h->mb.i_mb_xy] = 0;
+
+}
+
+static inline void x264_mb_mc_0xywh(MacroBlockPtr mb, uint8_t* src[3], int src_stride[3], 
+        uint8_t* dst[3], int dst_stride[3], int x, int y, int width, int height )
+{
+    const int i8 = x264_scan8[0]+x+8*y;
+    const int i_ref = mb->ref[0][i8];
+    assert(i_ref == 0);
+    const int mvx   = x264_clip3( mb->mv[0][i8][0], mb->mv_min[0], mb->mv_max[0] );
+    const int mvy   = x264_clip3( mb->mv[0][i8][1], mb->mv_min[1], mb->mv_max[1] );
+    std::cout << "mvx " << mvx << " mvy " << mvy << std::endl;
+
+    motion_compensation_luma( &src[0][4*y * src_stride[0]+4*x], src_stride[0],
+                    &dst[0][4*y * dst_stride[0]+4*x],           dst_stride[0],
+                    mvx, mvy, 4*width, 4*height );
+
+    motion_compensation_chroma( &src[1][2*y*src_stride[1]+2*x], src_stride[1],
+                      &dst[1][2*y*dst_stride[1]+2*x],           dst_stride[1],
+                      mvx, mvy, 2*width, 2*height );
+
+    motion_compensation_chroma( &src[2][2*y*src_stride[2]+2*x], src_stride[2],
+                      &dst[2][2*y*dst_stride[2]+2*x],           dst_stride[2],
+                      mvx, mvy, 2*width, 2*height );
+}
+
+void x264_mb_mc(MacroBlockPtr mb, uint8_t* src[3], int src_stride[3], uint8_t* dst[3], int dst_stride[3])
+{
+    if( mb->type == P_L0 )
+    {
+        x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, 0, 0, 4, 4 );
+    } else if (mb->type == P_16x8) {
+        x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, 0, 0, 4, 2 );
+        x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, 0, 2, 4, 2 );
+    } else if (mb->type == P_8x16) {
+        x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, 0, 0, 2, 4 );
+        x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, 2, 0, 2, 4 );
+    }
+    else if( mb->type == P_8x8)
+    {
+        int i;
+        for( i = 0; i < 4; i++ )
+        {
+            const int x = 2*(i%2);
+            const int y = 2*(i/2);
+            switch( mb->subPartition[i] )
+            {
+                case D_L0_8x8:
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x,y,2,2);
+                    break;
+                case D_L0_8x4:
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x,y+0,2,1);
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x,y+1,2,1);
+                    break;
+                case D_L0_4x8:
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x+0,y,1,2);
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x+1,y,1,2);
+                    break;
+                case D_L0_4x4:
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x+0,y+0,1,1);
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x+1,y+0,1,1);
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x+0,y+1,1,1);
+                    x264_mb_mc_0xywh( mb, src, src_stride, dst, dst_stride, x+1,y+1,1,1);
+                    break;
+            }
+        }
+    }
+}
+
+void x264_mb_decode_p16x16(int qscale, uint8_t* dst, int stride, int* luma4x4[16])
+{
+    int16_t dct4x4[16][4][4];
+    for(int i = 0; i < 16; i++) {
+        zigzag_to_4x4_full(luma4x4[i], dct4x4[i]);
+        x264_mb_dequant_4x4(dct4x4[i], qscale);
+    }
+    add16x16_idct(dst, stride, dct4x4);
+    std::cout << "p16x16 luma" << std::endl;
+    for(int h=0;h<16;h++){
+        uint8_t* p=dst+stride*h;
+        for(int w=0;w<16;w++){
+            std::cout << (int)p[w] << " ";
+        }
+        std::cout << std::endl;
+    }
+
+}
+
+void x264_frame_expand_border( FramePtr frame )
+{
+    int w;
+    int i, y;
+    for( i = 0; i < 3; i++ )
+    {
+#define PPIXEL(x, y) ( frame->plane[i] + (x) +(y)*frame->stride[i] )
+        w = ( i == 0 ) ? 32 : 16;
+
+        for( y = 0; y < w; y++ )
+        {
+            /* upper band */
+            memcpy( PPIXEL(0,-y-1), PPIXEL(0,0), frame->stride[i] - 2 * w);
+            /* up left corner */
+            memset( PPIXEL(-w,-y-1 ), PPIXEL(0,0)[0], w );
+            /* up right corner */
+            memset( PPIXEL(frame->stride[i] - 2*w,-y-1), PPIXEL( frame->stride[i]-1-2*w,0)[0], w );
+
+            /* lower band */
+            memcpy( PPIXEL(0, frame->lines[i]+y), PPIXEL(0,frame->lines[i]-1), frame->stride[i] - 2 * w );
+            /* low left corner */
+            memset( PPIXEL(-w, frame->lines[i]+y), PPIXEL(0,frame->lines[i]-1)[0], w);
+            /* low right corner */
+            memset( PPIXEL(frame->stride[i]-2*w, frame->lines[i]+y), PPIXEL(frame->stride[i]-1-2*w,frame->lines[i]-1)[0], w);
+
+        }
+        for( y = 0; y < frame->lines[i]; y++ )
+        {
+            /* left band */
+            memset( PPIXEL( -w, y ), PPIXEL( 0, y )[0], w );
+            /* right band */
+            memset( PPIXEL( frame->stride[i]-2*w, y ), PPIXEL( frame->stride[i] - 1-2*w, y )[0], w );
+        }
+#undef PPIXEL
     }
 }

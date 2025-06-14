@@ -96,9 +96,14 @@ int32_t NAL::read_se()
 
 bool NAL::eof()
 {
-    if (read_offset == bytes.size()) {
+    if (read_offset == bytes.size()*8) {
         return true;
     }
 
     return false;
+}
+
+void NAL::print()
+{
+    std::cout << "nal read offset " << read_offset << std::endl;
 }

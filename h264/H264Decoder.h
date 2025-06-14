@@ -77,6 +77,11 @@ struct MacroBlock {
     }block[16+8];
     int chromaDc[2][4];
     int luma16x16Dc[16];
+    int8_t ref[2][48];
+    int16_t mv[2][48][2];
+    int16_t mv_min[2];
+    int16_t mv_max[2];
+    int subPartition[4];
 };
 typedef std::shared_ptr<MacroBlock> MacroBlockPtr;
 
@@ -102,6 +107,8 @@ class H264Decoder {
         PPS pps;
         std::vector<FramePtr> refFrame;
         int8_t mbLastQp;
+        int16_t mv_min[2];
+        int16_t mv_max[2];
         void decodeNAL(NAL* n);
         void decodeSPS(NAL* n);
         void decodePPS(NAL* n);
@@ -110,14 +117,22 @@ class H264Decoder {
         void decodeSliceHeader(NAL* n, Frame& frame);
         void decodeSliceData(NAL* n, Frame& frame);
         void decodeMb(NAL* n, Frame& frame);
+        void decodeMbSkip(NAL* n, Frame& frame);
         void decodeMbIPCM(NAL* n, Frame& frame, MacroBlockPtr mb);
         void decodeMbI4x4(NAL* n, Frame& frame, MacroBlockPtr mb);
         void decodeMbI16x16(NAL* n, Frame& frame, MacroBlockPtr mb);
+        void decodeMbPL0(NAL* n, Frame& frame, MacroBlockPtr mb);
+        void decodeMbP8x8(NAL* n, Frame& frame, MacroBlockPtr mb, bool subRef0);
+        void decodeMbP8x16(NAL* n, Frame& frame, MacroBlockPtr mb);
+        void decodeMbP16x8(NAL* n, Frame& frame, MacroBlockPtr mb);
         int8_t predictIntra4x4Mode(MacroBlockPtr mb, int idx);
         void blockResidualReadCavlc(NAL* n, MacroBlockPtr mb, int idx, int* buf, int count);
         void initMb(Frame& frame, MacroBlockPtr mb);
         void fixMb(Frame& frame, MacroBlockPtr mb);
         void showFrame(FramePtr pf);
+        void subMbMvReadCavlc(MacroBlockPtr mb, NAL* n, int i_list );
+        void decodeI4x4(MacroBlockPtr mb, FramePtr f, int x, int y);
+        void decodeI16x16(MacroBlockPtr mb, FramePtr f, int x, int y);
 };
 
 #endif // !__H264_DECODER_H__
