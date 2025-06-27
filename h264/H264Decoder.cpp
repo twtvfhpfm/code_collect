@@ -154,7 +154,12 @@ void H264Decoder::decodeSPS(NAL* n)
     assert(sps.frameMbsOnlyFlag == 1);
     sps.direct8x8InferenceFlag = n->read_bits(1);
     sps.frameCroppingFlag = n->read_bits(1);
-    assert(sps.frameCroppingFlag == 0);
+    if (sps.frameCroppingFlag) {
+        n->read_ue();
+        n->read_ue();
+        n->read_ue();
+        n->read_ue();
+    }
     sps.vuiParametersPresentFlag = n->read_bits(1);
     // assert(sps.vuiParametersPresentFlag == 0);
     return;
@@ -872,9 +877,10 @@ void H264Decoder::decodeMbI4x4(NAL* n, Frame& f, MacroBlockPtr mb)
     uint8_t cbp = intra4x4GolombToCbp[cbpUe];
     mb->cbpLuma = cbp & 0xf;
     mb->cbpChroma = cbp >> 4;
+    int32_t deltaQp = 0;
     if (mb->cbpChroma != 0 || mb->cbpLuma != 0) {
-        mb->qp = n->read_se() + mbLastQp;
-        std::cout << "delta qp " << mb->qp - mbLastQp << std::endl;
+        deltaQp = n->read_se();
+        std::cout << "delta qp " << deltaQp << std::endl;
         for(int i = 0; i < 16; i++) {
             if (mb->cbpLuma & (1 << (i/4))) {
                 std::cout << "read cavlc " << i << std::endl;
@@ -882,6 +888,7 @@ void H264Decoder::decodeMbI4x4(NAL* n, Frame& f, MacroBlockPtr mb)
             }
         }
     }
+    mb->qp = deltaQp + mbLastQp;
     if (mb->cbpChroma != 0) {
         int buf[4];
         blockResidualReadCavlc(n, mb, BLOCK_INDEX_CHROMA_DC, mb->chromaDc[0], 4);
